@@ -1,0 +1,26 @@
+# Convenience wrapper around the Dockerfile.
+#
+# This project is a one-shot batch job, not a long-running service, so we define a
+# single "spark" service and run scripts against it on demand with
+# `docker compose run`. Compose's value here is bundling the build + the volume
+# mounts + the JVM memory limit into one short command.
+#
+# Usage:
+#   docker compose build                                   # build the image once
+#   docker compose run --rm spark python verify_spark.py   # check Spark starts
+#   docker compose run --rm spark python src/01_data_engineering.py
+#   docker compose run --rm spark python src/02_analytics.py
+
+services:
+  spark:
+    build: .
+    # Mount host folders into the container so the code reads/writes your real
+    # data and output without baking gigabytes into the image.
+    volumes:
+      - ./data:/app/data
+      - ./output:/app/output
+      - ./src:/app/src        # mount code so edits apply without rebuilding
+    # Give the Spark JVM room (local[*] driver does all the work). Raise if needed.
+    mem_limit: 4g
+    environment:
+      - PYSPARK_PYTHON=python

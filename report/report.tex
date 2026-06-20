@@ -1,0 +1,224 @@
+%% CSC 467 Big Data Engineering - Technical Report (IEEE Conference format)
+%%
+%% HOW TO TURN THIS INTO A PDF (no LaTeX needed on your machine):
+%%   1. Go to https://www.overleaf.com  (free account).
+%%   2. New Project -> paste this file as main.tex (or upload it).
+%%   3. ALSO upload the three figures from output/figures/ into the project:
+%%        fig_rating_distribution.png, fig_data_reduction.png, fig_rmse_tuning.png
+%%   4. Set the compiler to pdfLaTeX. Click "Recompile" -> download the PDF.
+%%
+%% TODO before submitting: re-read in your own voice and confirm it stays within 4 pages.
+
+\documentclass[conference]{IEEEtran}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+
+\begin{document}
+
+\title{Scalable Product Recommendation on Large-Scale Amazon Review Data
+Using Spark and Alternating Least Squares}
+
+\author{\IEEEauthorblockN{Charles Wang}
+\IEEEauthorblockA{CSC 467}}
+
+\maketitle
+
+\begin{abstract}
+Modern marketplaces offer more choice than any shopper can browse, which makes
+personalized recommendation essential. This paper addresses a single question: given a
+user's past product ratings, what should we recommend next? We study the Amazon Reviews
+2023 \texttt{Video\_Games} dataset of 4.62 million reviews. Using Apache Spark, we clean
+and reduce the raw reviews into a compact ratings table and then build a recommender with
+Alternating Least Squares (ALS) matrix factorization. After reduction the dataset holds
+953,017 ratings. A default ALS model reaches a root-mean-square error (RMSE) of 1.33 on
+held-out data; tuning the rank and regularization lowers it to 1.28. We pay particular
+attention to what makes this matrix difficult. It is roughly 99.999\% empty and heavily
+skewed toward five-star ratings, yet this sparsity is not an obstacle but the
+reason matrix factorization is the right tool.
+\end{abstract}
+
+\section{Introduction and Motivation}
+Large online marketplaces list far more products than any user can browse. Amazon carries
+tens of millions of items, so the platform must predict what each user is likely to value
+and surface it. The stakes are concrete on every side: sharper recommendations mean more
+sales for the retailer, less wasted searching for the shopper, and a path to the right
+buyers for individual sellers. But how do you recommend a product to someone who has rated
+only a handful out of millions? That is the question this project sets out to answer.
+
+Stated precisely: given a user's history of product ratings, which additional products
+should we recommend to that user? We pursue this on the Amazon Reviews 2023 collection
+released by the McAuley Lab~\cite{amazon2023}. The full corpus spans 571 million reviews;
+we narrow to the \texttt{Video\_Games} category, which holds 4{,}624{,}615 reviews and
+therefore clears the project's requirement of more than one million entities. The dataset
+is worth studying for three reasons. It is large-scale, too big to process in memory on one
+machine, which is why a distributed engine such as Spark is warranted. It is sparse:
+2{,}766{,}656 users have rated only 137{,}249 products, leaving a user-by-item matrix that
+is roughly 99.999\% empty. And it is skewed heavily toward positive ratings, which both
+reflects real user behavior and limits how accurate any model can be.
+
+\section{Data Engineering}
+\subsection{Acquisition}
+We downloaded the \texttt{Video\_Games} review file ($\approx$776\,MB gzip) and the item
+metadata file ($\approx$98\,MB). Each review is a JSON object carrying a user id
+(\texttt{user\_id}), a product id (\texttt{parent\_asin}), a 1--5 rating, a timestamp, and
+free text. The metadata maps each \texttt{parent\_asin} to a product title; because both
+files share \texttt{parent\_asin}, they can later be joined to turn opaque product codes
+into readable titles.
+
+\subsection{Descriptive Analysis}
+A first pass over the raw reviews gives the shape of the data: 4{,}624{,}615 reviews,
+2{,}766{,}656 distinct users, 137{,}249 distinct products, and a matrix sparsity near
+0.0012\%. The rating distribution (Fig.~\ref{fig:dist}) is the detail that matters most:
+more than 60\% of all ratings are five stars. Together, the sparsity and this skew dictate
+the modeling decisions in Section~III.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\columnwidth]{fig_rating_distribution.png}
+\caption{Rating distribution. More than 60\% of ratings are five stars which is a strong positive
+skew typical of real feedback data.}
+\label{fig:dist}
+\end{figure}
+
+\subsection{Cleaning and Reduction}
+Raw data is rarely the data you need. The reviews carry far more than a recommender
+requires, so we reduced them through a Spark pipeline. First, we kept only
+\texttt{(user\_id, parent\_asin, rating, timestamp)} and discarded the review text, the
+single largest source of shrinkage. Second, we removed null records and collapsed to one
+rating per (user, item) pair. Third, we dropped users and products with fewer than five
+ratings, since a model cannot learn from someone seen only once (the cold-start problem),
+and this step also strips away the long tail of one-time reviewers. The effect was
+dramatic: 4{,}624{,}615 reviews became 953{,}017 ratings, just 20.6\% of the original
+(Fig.~\ref{fig:reduction}). That 79\% reduction is not lost information so much as noise
+removed---most users had rated only one or two products. We wrote the cleaned table in
+Apache Parquet ($\approx$30\,MB versus the 776\,MB source), whose compressed columnar
+layout makes the analytics that follow noticeably faster.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\columnwidth]{fig_data_reduction.png}
+\caption{Data reduction in Task 1: 4.62M raw reviews reduced to 953K cleaned ratings.}
+\label{fig:reduction}
+\end{figure}
+
+\subsection{Validation}
+Inspecting nearly a million rows by eye is impossible, so we verified the cleaned data with
+assertions that run over the whole table and collapse to a single pass/fail: every rating
+falls within $[1,5]$, no field is null, no (user, item) pair is duplicated, and the table
+is non-empty. All checks passed. One limitation is worth stating plainly: the
+minimum-ratings filter runs in a single pass, so removing low-count items can push a few
+users back below five ratings. Guaranteeing a strict minimum would require iterating the
+filter to a fixed point, the 5-core of the user-item bipartite graph, which we leave as
+future work rather than claim a guarantee we did not enforce.
+
+\section{Data Analytics}
+\subsection{Method and Justification}
+To fill in the blanks of the rating matrix we use collaborative filtering by Alternating
+Least Squares (ALS), implemented in Spark MLlib. ALS approximates the sparse rating matrix
+$R$ as a product of two smaller matrices, $R \approx U V^{T}$, where $U$ holds a short list
+of latent factors for each user and $V$ holds the same for each item. Intuitively, the
+algorithm discovers a handful of hidden ``preference dimensions'' and places every user and
+every product along them, then predicts a rating by matching the two. The reason this suits
+our data is precisely the sparsity that looked alarming earlier: ALS learns each factor
+from only the \emph{observed} ratings and uses them to estimate the unobserved ones. The
+emptiness of the matrix is not missing data to be repaired---it is the very thing the model
+exists to predict~\cite{koren2009,zhou2008}. ALS also fits Spark naturally, since the two
+factor matrices can be solved by alternating between them~\cite{zaharia2016}.
+
+\subsection{Data Preparation and Tuning}
+ALS requires integer identifiers, so we mapped \texttt{user\_id} and \texttt{parent\_asin}
+to integer indices with \texttt{StringIndexer} and split the ratings 80/20 into train and
+test sets under a fixed random seed. Training ran for 10 iterations with nonnegative factors
+and a cold-start strategy that drops test rows whose user or item was unseen during
+training. Rather than trust a single guess at the settings, we tuned the two most
+consequential hyperparameters, the rank (the number of latent factors) and the
+regularization strength, across a small grid (Table~\ref{tab:tuning}, Fig.~\ref{fig:tuning}).
+
+\begin{table}[t]
+\centering
+\caption{ALS tuning results (test-set RMSE).}
+\label{tab:tuning}
+\begin{tabular}{ccc}
+\toprule
+rank & regParam & RMSE \\
+\midrule
+10 & 0.05 & 1.43 \\
+10 & 0.10 & 1.33 \\
+50 & 0.05 & 1.34 \\
+\textbf{50} & \textbf{0.10} & \textbf{1.28} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\columnwidth]{fig_rmse_tuning.png}
+\caption{RMSE by ALS configuration; the best (rank 50, regParam 0.10) is highlighted. A
+larger rank helps only when paired with enough regularization to prevent overfitting.}
+\label{fig:tuning}
+\end{figure}
+
+\subsection{Results}
+The best configuration (rank 50 with regularization 0.10) reached an RMSE of 1.28,
+improving on the 1.33 default baseline. The grid is also instructive on its own: a higher
+rank pays off only when the regularization is strong enough to keep it from overfitting,
+which is why rank 50 at the weaker setting actually trails rank 10. For a sample of users
+we generated top-10 recommendations and joined the metadata to recover titles. Two patterns
+stood out. Predicted scores sometimes climb past the 1--5 range, because ALS is an unbounded
+regression over latent factors; this is harmless, since only the \emph{ranking} of
+recommendations is used. More tellingly, a small set of products (a popular controller
+accessory and several older casual games) surfaced for nearly every user, and the lists
+leaned toward generic accessories rather than personalized picks. This is popularity bias,
+the familiar failure mode of collaborative filtering: when the model knows little about a
+particular user, it falls back on what is popular overall. It is the same sparsity from
+Section~II showing its other face.
+
+\section{Related Work}
+Collaborative filtering has a long lineage. Sarwar \emph{et al.} framed it around item-item
+similarity rather than user-user similarity~\cite{sarwar2001}. Matrix factorization came to
+prominence during the Netflix Prize, where Koren \emph{et al.} surveyed the latent-factor
+methods that proved most effective~\cite{koren2009}, and Zhou \emph{et al.} introduced the
+large-scale parallel ALS we rely on here~\cite{zhou2008}. Hu \emph{et al.} adapted these
+ideas to implicit-feedback data~\cite{hu2008}, a promising route for ratings as skewed as
+ours. On the systems side, Zaharia \emph{et al.} describe Apache Spark~\cite{zaharia2016},
+and Hou \emph{et al.} document the dataset~\cite{amazon2023}. Our contribution is to adapt
+parallel ALS on Spark to a single large Amazon category, with an emphasis on the
+data-engineering reduction and on reporting baseline quality honestly rather than
+flatteringly.
+
+\section{Conclusion}
+We set out to recommend products from a user's rating history at scale. Using Spark we
+reduced 4.62 million raw reviews to a validated 953{,}017-rating table (a 79\% cut driven
+by the data's own sparsity) and trained a tuned ALS model that reached an RMSE of 1.28.
+Beyond the single number, the project illustrates the shape of big-data work: acquire data
+too large for one machine, engineer it into a compact and trustworthy form, and let a
+distributed algorithm surface the pattern inside. The central insight is an inversion of
+intuition: the near-empty rating matrix that first looks like a defect is what makes matrix
+factorization worth doing, while the same sparsity that motivates the method also caps how
+far it can go. Future work includes iterating the k-core filter toward a denser matrix,
+widening the hyperparameter search, and exploring implicit-feedback models better matched to
+skewed ratings.
+
+\section*{Use of AI Assistance}
+In the interest of transparency, I have used AI tools such as ChatGPT in the creation of this PDF. I asked it to process my report, as well as grammatical checks, in a format that is compatible with LaTeX. Proper formatting for bibliography was also used with AI assistance. I take full
+responsibility for the content and I confirm that every reported result was produced by
+the project's own code.
+
+\begin{thebibliography}{1}
+\bibitem{koren2009} Y. Koren, R. Bell, and C. Volinsky, ``Matrix factorization techniques
+for recommender systems,'' \emph{Computer}, vol. 42, no. 8, pp. 30--37, 2009.
+\bibitem{zaharia2016} M. Zaharia \emph{et al.}, ``Apache Spark: a unified engine for big
+data processing,'' \emph{Commun. ACM}, vol. 59, no. 11, pp. 56--65, 2016.
+\bibitem{hu2008} Y. Hu, Y. Koren, and C. Volinsky, ``Collaborative filtering for implicit
+feedback datasets,'' in \emph{Proc. IEEE ICDM}, 2008, pp. 263--272.
+\bibitem{zhou2008} Y. Zhou, D. Wilkinson, R. Schreiber, and R. Pan, ``Large-scale parallel
+collaborative filtering for the Netflix prize,'' in \emph{Proc. AAIM}, 2008, pp. 337--348.
+\bibitem{amazon2023} Y. Hou, J. Li, Z. He, A. Yan, X. Chen, and J. McAuley, ``Bridging
+language and items for retrieval and recommendation,'' arXiv:2403.03952, 2024.
+\bibitem{sarwar2001} B. Sarwar, G. Karypis, J. Konstan, and J. Riedl, ``Item-based
+collaborative filtering recommendation algorithms,'' in \emph{Proc. WWW}, 2001,
+pp. 285--295.
+\end{thebibliography}
+
+\end{document}

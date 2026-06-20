@@ -1,0 +1,3 @@
+pyspark==3.5.1
+numpy==1.26.4       # required by Spark MLlib ALS (Task 2)
+matplotlib==3.8.4   # used by src/make_figures.py to render report charts

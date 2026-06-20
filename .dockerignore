@@ -1,0 +1,12 @@
+# Keep the build context small + fast. Data is mounted at runtime, not copied in.
+data/
+output/
+school_notes/
+.spark-tmp/
+hadoop/
+spark-conf/
+__pycache__/
+*.pyc
+.git/
+DEVLOG.md
+*.md

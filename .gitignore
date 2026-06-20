@@ -1,0 +1,38 @@
+# ============================================================
+# PUBLIC REPO .gitignore (whitelist style)
+# Default: ignore EVERYTHING. Only the crucial project files are
+# explicitly allowed below, so nothing personal/large leaks by
+# accident (school_notes, data, study aids, drafts, etc.).
+# ============================================================
+/*
+
+# --- root files to publish ---
+!/.gitignore
+!/.dockerignore
+!/README.md
+!/requirements.txt
+!/Dockerfile
+!/docker-compose.yml
+!/setup-pyspark.ps1
+!/verify_spark.py
+
+# --- directories to publish ---
+!/src/
+!/hadoop/
+!/spark-conf/
+!/docs/
+!/output/
+!/report/
+
+# --- noise to drop inside the published directories ---
+spark-conf/spark-defaults.conf
+output/stats/
+report/report.txt
+report/project-explained.md
+**/__pycache__/
+*.pyc
+
+# Everything NOT explicitly allowed above stays ignored, including:
+#   data/  school_notes/  lessons/  .claude/  .spark-tmp/
+#   instructions.md  DEVLOG.md  algorithms_recap.md  project_outline.md
+#   project.zip
