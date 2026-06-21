@@ -1,12 +1,5 @@
 # CSC 467 Big Data Project — Amazon Reviews Recommender (Spark + ALS)
 
-> **Use of AI Assistance.** In the interest of transparency, I have used AI tools such as
-> ChatGPT in the creation of this PDF on Overleaf. I asked it to process my writings, as
-> well as suggesting grammatical checks and sentence structures, in a format that is
-> parsable with LaTeX. Proper formatting for bibliography was also used with AI assistance.
-> I also used Codex assistance for debugging. I take full responsibility for the content and
-> I confirm that every reported result was produced by my project's own code.
-
 A Spark-based recommendation system built on the **Amazon Reviews 2023** dataset.
 Given a user's past product ratings, it recommends products using **ALS
 collaborative filtering** (latent-factor matrix factorization).
